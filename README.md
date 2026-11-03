@@ -21,7 +21,8 @@ data/cifar10_test_50.npz  les 50 premières images du jeu de test CIFAR-10 (uint
 notebooks/                un notebook par pipeline + notebook de comparaison
 results/                  résultats bruts (JSON) et tableau de synthèse (CSV)
 figures/                  graphiques générés
-rapport/                  rapport technique (PDF)
+rapport/rapport.pdf       rapport technique
+rapport/build_report.py   génère le rapport et ses figures (rapport/figures/) à partir des résultats
 ```
 
 ## Protocole expérimental (commun aux 4 pipelines, défini dans `common.py`)
@@ -49,8 +50,29 @@ Ensuite, exécuter `05_comparaison.ipynb` (n'importe quel environnement, sans GP
 
 Exécution locale (CPU) : `pip install torch torchvision openvino onnx pandas matplotlib`, puis lancer les notebooks depuis `notebooks/`. Sous Windows, `torch.compile` exige le compilateur MSVC.
 
+Le rapport PDF se régénère à partir des résultats avec `python rapport/build_report.py` (dépendances : `reportlab`, `matplotlib`, `pandas`).
+
 ## Principales conclusions
 
-*À compléter avec les mesures Colab (voir `rapport/`).*
+Mesures Colab : CPU Intel Xeon 2,2 GHz (2 vCPU, 1 thread PyTorch) et GPU Tesla T4. Moyenne ± écart-type sur 10 exécutions des 50 images, en batchs de 10. Le détail est dans le [rapport](rapport/rapport.pdf) et dans [results/synthese.csv](results/synthese.csv).
 
-Tests préliminaires en local (i7-11800H, hors protocole Colab) : OpenVINO FP32 traite environ **1,8× plus d'images/s** que PyTorch eager, et TorchScript environ 1,08×. Les prédictions sont identiques (écart max des logits ≈ 2·10⁻⁵) et la précision Top-1 est de **64 %** sur les 50 images, une limite qui vient du modèle ImageNet utilisé sans réentraînement et non des optimisations.
+| Pipeline | Variante | Débit (img/s) | Temps 50 images (ms) | Gain vs eager | Énergie GPU / image |
+|---|---|---|---|---|---|
+| CPU n°1 | PyTorch eager (réf.) | 13,1 ± 1,3 | 3865 ± 405 | – | n/d |
+| | OpenVINO FP32 | 17,8 ± 2,0 | 2842 ± 362 | ×1,37 | n/d |
+| CPU n°2 | PyTorch eager (réf.) | 11,6 ± 0,9 | 4352 ± 341 | – | n/d |
+| | TorchScript (freeze) | 14,4 ± 2,3 | 3555 ± 649 | ×1,25 | n/d |
+| | torch.compile (Inductor) | 15,6 ± 1,5 | 3243 ± 327 | ×1,35 | n/d |
+| GPU n°1 | PyTorch eager (réf.) | 803 ± 33 | 62,4 ± 2,8 | – | 84 mJ |
+| | TensorRT FP32 | 1212 ± 31 | 41,3 ± 1,0 | ×1,51 | 56 mJ |
+| | TensorRT FP16 | 4095 ± 480 | 12,4 ± 2,0 | ×5,10 | 15 mJ |
+| GPU n°2 | PyTorch eager (réf.) | 830 ± 7 | 60,3 ± 0,5 | – | 84 mJ |
+| | TorchScript (freeze) | 916 ± 14 | 54,6 ± 0,8 | ×1,10 | 75 mJ |
+| | torch.compile (Inductor) | 539 ± 8 | 92,9 ± 1,5 | ×0,65 | 126 mJ |
+
+- **Le matériel prime** : à code égal, le T4 est environ 72 fois plus rapide que le CPU Colab.
+- **TensorRT est la chaîne la plus performante** : ×1,5 en FP32 avec des prédictions identiques, et ×5,1 en FP16 grâce aux Tensor Cores, pour 82 % d'énergie en moins par image. Le GPU tourne à pleine puissance (67-69 W) dans toutes les variantes, donc l'énergie par image suit directement le débit.
+- **Sur CPU, les trois optimisations se valent** (×1,25 à ×1,37) : leurs écarts sont noyés dans la variabilité de la VM partagée (CV de 8 à 16 %). OpenVINO compile en 0,5 s, contre 25 s pour torch.compile.
+- **torch.compile est plus lent qu'eager sur le T4 en FP32** (×0,65) : une compilation doit toujours être mesurée face à la référence.
+- **Aucune optimisation ne change une prédiction** : précision Top-1 de 64 % partout et accord de 100 % entre les 11 variantes. L'écart sur les logits est d'environ 3·10⁻⁵ en FP32 et de 6·10⁻² en FP16. Le score de 64 % vient du modèle ImageNet appliqué sans réentraînement à des images 32×32 agrandies, et du regroupement des classes (11 des 18 erreurs sont prédites *dog*, un groupe de 118 classes).
+- **Méthode** : les mesures CPU varient de 13 % d'une session Colab à l'autre, d'où une référence eager par notebook. Sur GPU, la première exécution mesurée est parfois lente, signe que la chauffe est trop courte.
